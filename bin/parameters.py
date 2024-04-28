@@ -2,6 +2,7 @@ from init_gui import getparams
 from scipy.spatial.transform import Rotation as R
 import cv2
 import json
+from helpers import Skeleton
 
 class Parameters():
     def __init__(self) -> None:
@@ -31,6 +32,9 @@ class Parameters():
         self.additional_smoothing_2 = 0.9
         self.feet_rotation = param["feetrot"]
         self.use_hands = param["use_hands"]
+
+        self.use_elbows = False
+        self.use_knees = False
         self.ignore_hip = param["ignore_hip"]
         
         self.camera_settings = param["camera_settings"]
@@ -77,6 +81,8 @@ class Parameters():
         
         self.smoothing = self.smoothing_1
         self.additional_smoothing = self.additional_smoothing_1
+
+        self.VR_skeleton_og:Skeleton = None
         
         #if advanced mode is disabled, always reset smoothing and camera latency to 0
         if not self.advanced:

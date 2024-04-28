@@ -6,7 +6,8 @@ from pythonosc import osc_bundle_builder
 from pythonosc import osc_message_builder
 from pythonosc import udp_client
 
-from helpers import shutdown
+from helpers import shutdown, Skeleton, FootRotation
+from parameters import Parameters
 import numpy as np
 
 class Backend(ABC):
@@ -20,7 +21,7 @@ class Backend(ABC):
         ...
 
     @abstractmethod
-    def updatepose(self, params, pose3d, rots, hand_rots):
+    def updatepose(self, params, skeleton:Skeleton, rots:FootRotation, hand_rots):
         ...
 
     @abstractmethod
@@ -38,7 +39,7 @@ class DummyBackend(Backend):
     def connect(self, params):
         pass
 
-    def updatepose(self, params, pose3d, rots, hand_rots):
+    def updatepose(self, params, skeleton:Skeleton, rots:FootRotation, hand_rots):
         pass
 
     def disconnect(self):
@@ -49,13 +50,13 @@ class SteamVRBackend(Backend):
     def __init__(self, **kwargs):
         pass
 
-    def onparamchanged(self, params):
+    def onparamchanged(self, params:Parameters):
         resp = sendToSteamVR(f"settings 50 {params.smoothing} {params.additional_smoothing}")
         if resp is None:
             print("ERROR: Could not connect to SteamVR after 10 tries! Launch SteamVR and try again.")
             shutdown(params)
             
-    def connect(self, params):
+    def connect(self, params:Parameters):
         print("Connecting to SteamVR")
 
         #ask the driver, how many devices are connected to ensure we dont add additional trackers
@@ -68,20 +69,27 @@ class SteamVRBackend(Backend):
         numtrackers = int(numtrackers[2])
 
         #games use 3 trackers, but we can also send the entire skeleton if we want to look at how it works
-        totaltrackers = 23 if params.preview_skeleton else  3
-        if params.use_hands:
-            totaltrackers = 5
-        if params.ignore_hip:
-            totaltrackers -= 1
-
         roles = ["TrackerRole_Waist", "TrackerRole_RightFoot", "TrackerRole_LeftFoot"]
+        if params.preview_skeleton:
+            totaltrackers = 23
+        else:
+            totaltrackers = 3
+            if params.use_hands:
+                totaltrackers += 2
+                roles.append("TrackerRole_Handed")
+                roles.append("TrackerRole_Handed")
+            if params.use_elbows:
+                totaltrackers += 2
+                roles.append("TrackerRole_RightElbow")
+                roles.append("TrackerRole_LeftElbow")
+            if params.use_knees:
+                totaltrackers += 2
+                roles.append("TrackerRole_RightKnee")
+                roles.append("TrackerRole_LeftKnee")
 
-        if params.ignore_hip and not params.preview_skeleton:
-            del roles[0]
-
-        if params.use_hands:
-            roles.append("TrackerRole_Handed")
-            roles.append("TrackerRole_Handed")
+            if params.ignore_hip:
+                totaltrackers -= 1
+                del roles[0]
 
         for i in range(len(roles),totaltrackers):
             roles.append("None")
@@ -98,15 +106,15 @@ class SteamVRBackend(Backend):
             print("ERROR: Could not connect to SteamVR after 10 tries! Launch SteamVR and try again.")
             shutdown(params)
 
-    def updatepose(self, params, pose3d, rots, hand_rots):
-        array = sendToSteamVR("getdevicepose 0")        #get hmd data to allign our skeleton to
+    def updatepose(self, params:Parameters, skeleton:Skeleton, rots:FootRotation, hand_rots):
+        HeadSetPosAndRot = sendToSteamVR("getdevicepose 0")        #get hmd data to allign our skeleton to
 
-        if array is None or len(array) < 10:
+        if HeadSetPosAndRot is None or len(HeadSetPosAndRot) < 10:
             print("ERROR: Could not connect to SteamVR after 10 tries! Launch SteamVR and try again.")
             shutdown(params)
 
-        headsetpos = [float(array[3]),float(array[4]),float(array[5])]
-        headsetrot = R.from_quat([float(array[7]),float(array[8]),float(array[9]),float(array[6])])
+        headsetpos = [float(HeadSetPosAndRot[3]),float(HeadSetPosAndRot[4]),float(HeadSetPosAndRot[5])]
+        headsetrot = R.from_quat([float(HeadSetPosAndRot[7]),float(HeadSetPosAndRot[8]),float(HeadSetPosAndRot[9]),float(HeadSetPosAndRot[6])])
 
         neckoffset = headsetrot.apply(params.hmd_to_neck_offset)   #the neck position seems to be the best point to allign to, as its well defined on
                                                             #the skeleton (unlike the eyes/nose, which jump around) and can be calculated from hmd.
@@ -115,27 +123,31 @@ class SteamVRBackend(Backend):
             print("INFO: frame to recalibrate")
 
         else:
-            pose3d = pose3d * params.posescale     #rescale skeleton to calibrated height
-            #print(pose3d)
-            offset = pose3d[7] - (headsetpos+neckoffset)    #calculate the position of the skeleton
+            skeleton = skeleton * params.posescale     #rescale skeleton to calibrated height
+            # offset = np.array([0.1, 0, 0])
+            offset = skeleton.skeleton_points['Torso'] - (headsetpos+neckoffset)    #calculate the position of the skeleton
             if not params.preview_skeleton:
-                numadded = 3
+                joint = skeleton.skeleton_points['RightAnkle'] - offset
+                sendToSteamVR(f"updatepose 1 {joint[0]} {joint[1]} {joint[2]} {rots.RightFoot[3]} {rots.RightFoot[0]} {rots.RightFoot[1]} {rots.RightFoot[2]} {params.camera_latency} 0.8")
+
+                joint = skeleton.skeleton_points['LeftAnkle'] - offset
+                sendToSteamVR(f"updatepose 2 {joint[0]} {joint[1]} {joint[2]} {rots.LeftFoot[3]} {rots.LeftFoot[0]} {rots.LeftFoot[1]} {rots.LeftFoot[2]} {params.camera_latency} 0.8")
+
                 if not params.ignore_hip:
-                    for i in [(0,1),(5,2),(6,0)]:
-                        joint = pose3d[i[0]] - offset       #for each foot and hips, offset it by skeleton position and send to steamvr
-                        sendToSteamVR(f"updatepose {i[1]} {joint[0]} {joint[1]} {joint[2]} {rots[i[1]][3]} {rots[i[1]][0]} {rots[i[1]][1]} {rots[i[1]][2]} {params.camera_latency} 0.8")
-                else:
-                    for i in [(0,1),(5,2)]:
-                        joint = pose3d[i[0]] - offset       #for each foot and hips, offset it by skeleton position and send to steamvr
-                        sendToSteamVR(f"updatepose {i[1]} {joint[0]} {joint[1]} {joint[2]} {rots[i[1]][3]} {rots[i[1]][0]} {rots[i[1]][1]} {rots[i[1]][2]} {params.camera_latency} 0.8")
-                        numadded = 2
+                    joint = skeleton.skeleton_points['HipCenter'] - offset
+                    sendToSteamVR(f"updatepose 0 {joint[0]} {joint[1]} {joint[2]} {rots.Hip[3]} {rots.Hip[0]} {rots.Hip[1]} {rots.Hip[2]} {params.camera_latency} 0.8")
+
                 if params.use_hands:
-                    for i in [(10,0),(15,1)]:
-                        joint = pose3d[i[0]] - offset       #for each foot and hips, offset it by skeleton position and send to steamvr
-                        sendToSteamVR(f"updatepose {i[1]+numadded} {joint[0]} {joint[1]} {joint[2]} {hand_rots[i[1]][3]} {hand_rots[i[1]][0]} {hand_rots[i[1]][1]} {hand_rots[i[1]][2]} {params.camera_latency} 0.8")
+                    joint = skeleton.skeleton_points['RightWrist'] - offset
+                    sendToSteamVR(f"updatepose 3 {joint[0]} {joint[1]} {joint[2]} {hand_rots[0][3]} {hand_rots[0][0]} {hand_rots[0][1]} {hand_rots[0][2]} {params.camera_latency} 0.8")
+
+                    joint = skeleton.skeleton_points['LeftWrist'] - offset
+                    sendToSteamVR(f"updatepose 4 {joint[0]} {joint[1]} {joint[2]} {hand_rots[1][3]} {hand_rots[1][0]} {hand_rots[1][1]} {hand_rots[1][2]} {params.camera_latency} 0.8")
+                pass
+
             else:
-                for i in range(23):
-                    joint = pose3d[i] - offset      #if previewing skeleton, send the position of each keypoint to steamvr without rotation
+                for i, (key, value) in zip(range(skeleton.Nr_of_skeleton_points), skeleton.skeleton_points.items()):
+                    joint = value - offset      #if previewing skeleton, send the position of each keypoint to steamvr without rotation
                     sendToSteamVR(f"updatepose {i} {joint[0]} {joint[1]} {joint[2] - 2} 1 0 0 0 {params.camera_latency} 0.8")
         return True
 
@@ -172,7 +184,7 @@ class VRChatOSCBackend(Backend):
         else:
             self.client = udp_client.UDPClient("127.0.0.1", 9000)
 
-    def updatepose(self, params, pose3d, rots, hand_rots):
+    def updatepose(self, params, pose3d:Skeleton, rots, hand_rots):
     
         #pose3d[:,1] = -pose3d[:,1]      #flip the positions as coordinate system is different from steamvr
         #pose3d[:,0] = -pose3d[:,0]

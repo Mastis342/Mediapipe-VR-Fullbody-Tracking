@@ -10,64 +10,244 @@ import cv2
 import threading
 import sys
 
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from parameters import Parameters
+
 def draw_pose(frame,pose,size):
     pose = pose*size
     for sk in EDGES:
         cv2.line(frame,(int(pose[sk[0],1]),int(pose[sk[0],0])),(int(pose[sk[1],1]),int(pose[sk[1],0])),(0,255,0),3)
 
-def mediapipeTo3dpose(lms):
-    #33 pose landmarks as in https://google.github.io/mediapipe/solutions/pose.html#pose-landmark-model-blazepose-ghum-3d
-    #convert landmarks returned by mediapipe to skeleton that I use.
-    #lms = results.pose_world_landmarks.landmark
+class _3dPoint():
+    def __init__(self, x, y, z):
+        self.x = x
+        self.y = y
+        self.z = z
     
-    pose = np.zeros((29,3))
+    def __add__(self, other:'_3dPoint'):
+        Result = _3dPoint(self.x + other.x,
+                          self.y + other.y,
+                          self.z + other.z) 
+        return Result
 
-    pose[0]=[lms[28].x,lms[28].y,lms[28].z]
-    pose[1]=[lms[26].x,lms[26].y,lms[26].z]
-    pose[2]=[lms[24].x,lms[24].y,lms[24].z]
-    pose[3]=[lms[23].x,lms[23].y,lms[23].z]
-    pose[4]=[lms[25].x,lms[25].y,lms[25].z]
-    pose[5]=[lms[27].x,lms[27].y,lms[27].z]
-
-    pose[6]=[0,0,0]
-
-    #some keypoints in mediapipe are missing, so we calculate them as avarage of two keypoints
-    pose[7]=[lms[12].x/2+lms[11].x/2,lms[12].y/2+lms[11].y/2,lms[12].z/2+lms[11].z/2]
-    pose[8]=[lms[10].x/2+lms[9].x/2,lms[10].y/2+lms[9].y/2,lms[10].z/2+lms[9].z/2]
-
-    pose[9]=[lms[0].x,lms[0].y,lms[0].z]
-
-    pose[10]=[lms[15].x,lms[15].y,lms[15].z]
-    pose[11]=[lms[13].x,lms[13].y,lms[13].z]
-    pose[12]=[lms[11].x,lms[11].y,lms[11].z]
-
-    pose[13]=[lms[12].x,lms[12].y,lms[12].z]
-    pose[14]=[lms[14].x,lms[14].y,lms[14].z]
-    pose[15]=[lms[16].x,lms[16].y,lms[16].z]
-
-    pose[16]=[pose[6][0]/2+pose[7][0]/2,pose[6][1]/2+pose[7][1]/2,pose[6][2]/2+pose[7][2]/2]
-
-    #right foot
-    pose[17] = [lms[31].x,lms[31].y,lms[31].z]  #forward
-    pose[18] = [lms[29].x,lms[29].y,lms[29].z]  #back  
-    pose[19] = [lms[25].x,lms[25].y,lms[25].z]  #up
+    def __truediv__(self, divisor:float):
+        Result = _3dPoint(self.x/divisor,
+                          self.y/divisor,
+                          self.z/divisor)
+        return Result
     
-    #left foot
-    pose[20] = [lms[32].x,lms[32].y,lms[32].z]  #forward
-    pose[21] = [lms[30].x,lms[30].y,lms[30].z]  #back
-    pose[22] = [lms[26].x,lms[26].y,lms[26].z]  #up
-    
-    #right hand
-    pose[23] = [lms[17].x,lms[17].y,lms[17].z]  #forward
-    pose[24] = [lms[15].x,lms[15].y,lms[15].z]  #back
-    pose[25] = [lms[19].x,lms[19].y,lms[19].z]  #up
-    
-    #left hand
-    pose[26] = [lms[18].x,lms[18].y,lms[18].z]  #forward
-    pose[27] = [lms[16].x,lms[16].y,lms[16].z]  #back
-    pose[28] = [lms[20].x,lms[20].y,lms[20].z]  #up
+    def __mul__(self, factor:float):
+        Result = _3dPoint(self.x * factor,
+                          self.y * factor,
+                          self.z * factor)
+        return Result
 
-    return pose
+    def __mul__(self, other:'_3dPoint'):
+        Result = _3dPoint(self.x * other.x +
+                          self.y * other.y +
+                          self.z * other.z)
+        return Result
+
+    
+    def generate_np_vector_from_3d_point(self):
+        '''
+        Generate an np vector representation that is usable by SteamVR
+        x and y direction are flipped for SteamVR
+
+        Input:
+            _3dPoint
+        Output:
+            3x1 np vector
+        '''
+        return np.array([-self.x, -self.y, self.z])
+
+class FootRotation():
+    '''
+    Class to save foot rotation
+    '''
+    def __init__(self, RightFoot, LeftFoot, Hip) -> None:
+
+        self.RightFoot = RightFoot
+        self.LeftFoot  = LeftFoot
+        self.Hip       = Hip
+
+class LandmarkPose():
+    '''
+    Class to save a landmark pose
+    '''
+    def __init__(self) -> None:
+        #33 pose landmarks as in https://google.github.io/mediapipe/solutions/pose.html#pose-landmark-model-blazepose-ghum-3d
+        #convert landmarks returned by mediapipe to skeleton that I use.
+        #lms = results.pose_world_landmarks.landmark
+        self.lms = None
+
+        self.LMNose             = None
+        self.LMRightEyeInner    = None
+        self.LMRightEye         = None
+        self.LMRightEyeOuter    = None
+        self.LMLeftEyeInner     = None
+        self.LMLeftEye          = None
+        self.LMLeftEyeOuter     = None
+        self.LMRightEar         = None
+        self.LMLeftEar          = None
+        self.LMMouthRight       = None
+        self.LMMouthLeft        = None
+        self.LMRightShoulder    = None
+        self.LMLeftShoulder     = None
+        self.LMRightElbow       = None
+        self.LMLeftElbow        = None
+        self.LMRightWrist       = None
+        self.LMLeftWrist        = None
+        self.LMRightPinky       = None
+        self.LMLeftPinky        = None
+        self.LMRightIndex       = None
+        self.LMLeftIndex        = None
+        self.LMRightThumb       = None
+        self.LMLeftThumb        = None
+        self.LMRightHip         = None
+        self.LMLeftHip          = None
+        self.LMRightKnee        = None
+        self.LMLeftKnee         = None
+        self.LMRightAnkle       = None
+        self.LMLeftAnkle        = None
+        self.LMRightHeel        = None
+        self.LMLeftHeel         = None
+        self.LMRightFootIndex   = None
+        self.LMLeftFootIndex    = None
+
+    def update_landmarks(self, lms):
+        self.lms = lms
+
+        self.LMNose             = self.generate_3d_point_from_landmark(lms[0])
+        self.LMRightEyeInner    = self.generate_3d_point_from_landmark(lms[1])
+        self.LMRightEye         = self.generate_3d_point_from_landmark(lms[2])
+        self.LMRightEyeOuter    = self.generate_3d_point_from_landmark(lms[3])
+        self.LMLeftEyeInner     = self.generate_3d_point_from_landmark(lms[4])
+        self.LMLeftEye          = self.generate_3d_point_from_landmark(lms[5])
+        self.LMLeftEyeOuter     = self.generate_3d_point_from_landmark(lms[6])
+        self.LMRightEar         = self.generate_3d_point_from_landmark(lms[7])
+        self.LMLeftEar          = self.generate_3d_point_from_landmark(lms[8])
+        self.LMMouthRight       = self.generate_3d_point_from_landmark(lms[9])
+        self.LMMouthLeft        = self.generate_3d_point_from_landmark(lms[10])
+        self.LMRightShoulder    = self.generate_3d_point_from_landmark(lms[11])
+        self.LMLeftShoulder     = self.generate_3d_point_from_landmark(lms[12])
+        self.LMRightElbow       = self.generate_3d_point_from_landmark(lms[13])
+        self.LMLeftElbow        = self.generate_3d_point_from_landmark(lms[14])
+        self.LMRightWrist       = self.generate_3d_point_from_landmark(lms[15])
+        self.LMLeftWrist        = self.generate_3d_point_from_landmark(lms[16])
+        self.LMRightPinky       = self.generate_3d_point_from_landmark(lms[17])
+        self.LMLeftPinky        = self.generate_3d_point_from_landmark(lms[18])
+        self.LMRightIndex       = self.generate_3d_point_from_landmark(lms[19])
+        self.LMLeftIndex        = self.generate_3d_point_from_landmark(lms[20])
+        self.LMRightThumb       = self.generate_3d_point_from_landmark(lms[21])
+        self.LMLeftThumb        = self.generate_3d_point_from_landmark(lms[22])
+        self.LMRightHip         = self.generate_3d_point_from_landmark(lms[23])
+        self.LMLeftHip          = self.generate_3d_point_from_landmark(lms[24])
+        self.LMRightKnee        = self.generate_3d_point_from_landmark(lms[25])
+        self.LMLeftKnee         = self.generate_3d_point_from_landmark(lms[26])
+        self.LMRightAnkle       = self.generate_3d_point_from_landmark(lms[27])
+        self.LMLeftAnkle        = self.generate_3d_point_from_landmark(lms[28])
+        self.LMRightHeel        = self.generate_3d_point_from_landmark(lms[29])
+        self.LMLeftHeel         = self.generate_3d_point_from_landmark(lms[30])
+        self.LMRightFootIndex   = self.generate_3d_point_from_landmark(lms[31])
+        self.LMLeftFootIndex    = self.generate_3d_point_from_landmark(lms[32])
+
+    def generate_3d_point_from_landmark(self, landmark) -> _3dPoint:
+        return _3dPoint(landmark.x, landmark.y, landmark.z)
+
+class Skeleton():
+    '''
+    Returns an 29x3 Matrix with 29 Pose positions saved in x,y,z coordinates
+    '''
+    def __init__(self):
+
+        self.skeleton_points = {}
+
+        self.Nr_of_skeleton_points = len(self.skeleton_points)
+
+    def __mul__(self, factor) -> 'Skeleton':
+        '''
+        Multiplies all the vectors belonging to the skeleton by the scale factor
+        '''
+        NewSkeleton = self.copy()
+        
+        # for i in dir(self):
+        #     if i == 'lms':
+        #         continue
+
+        #     if '__' not in i:
+        #         # Copy Landmarks and Skeleton
+        #         exec(f'NewSkeleton.{i} = self.{i}')
+        #         if 'LM' not in i:
+        #             # Multiply Skeleton
+        #             exec(f'NewSkeleton.{i} = NewSkeleton.{i} * {factor}')
+        for key, value in NewSkeleton.skeleton_points.items():
+            NewSkeleton.skeleton_points[key] = value * factor
+
+        return NewSkeleton
+    
+    # def __iter__(self):
+    #     return self.Origin
+
+    # def __next__(self):
+    #     if self._index < self.Nr_of_skeleton_points:
+
+    def update_skeleton(self, landmark:LandmarkPose):
+
+        self.skeleton_points = {
+            'Origin'            : np.array([0,0,0]),
+            
+            # Right leg
+            'RightAnkle'        : landmark.LMRightAnkle.generate_np_vector_from_3d_point(),
+            'RightHeel'         : landmark.LMRightHeel.generate_np_vector_from_3d_point(),           # Back
+            'RightFootIndex'    : landmark.LMRightFootIndex.generate_np_vector_from_3d_point(),      # Forward
+            'RightKnee'         : landmark.LMRightKnee.generate_np_vector_from_3d_point(),           # Up
+            'RightHip'          : landmark.LMRightHip.generate_np_vector_from_3d_point(),
+
+            # Left leg
+            'LeftAnkle'         : landmark.LMLeftAnkle.generate_np_vector_from_3d_point(),
+            'LeftHeel'          : landmark.LMLeftHeel.generate_np_vector_from_3d_point(),            # Back
+            'LeftFootIndex'     : landmark.LMLeftFootIndex.generate_np_vector_from_3d_point(),       # Forward
+            'LeftKnee'          : landmark.LMLeftKnee.generate_np_vector_from_3d_point(),            # Up
+            'LeftHip'           : landmark.LMLeftHip.generate_np_vector_from_3d_point(),
+
+            # Right arm
+            'RightWrist'        : landmark.LMRightWrist.generate_np_vector_from_3d_point(),          # Back
+            'RightPinky'        : landmark.LMRightPinky.generate_np_vector_from_3d_point(),          # Forward
+            'RightIndex'        : landmark.LMRightIndex.generate_np_vector_from_3d_point(),          # Up
+            'RightElbow'        : landmark.LMRightElbow.generate_np_vector_from_3d_point(),
+            'RightShoulder'     : landmark.LMRightShoulder.generate_np_vector_from_3d_point(),
+
+            # Left arm
+            'LeftWrist'         : landmark.LMLeftWrist.generate_np_vector_from_3d_point(),           # Back
+            'LeftPinky'         : landmark.LMLeftPinky.generate_np_vector_from_3d_point(),           # Forward
+            'LeftIndex'         : landmark.LMLeftIndex.generate_np_vector_from_3d_point(),           # Up
+            'LeftElbow'         : landmark.LMLeftElbow.generate_np_vector_from_3d_point(),
+            'LeftShoulder'      : landmark.LMLeftShoulder.generate_np_vector_from_3d_point(),
+
+            'Torso'             : ((landmark.LMLeftShoulder + landmark.LMRightShoulder)/2).generate_np_vector_from_3d_point(),
+            'Mouth'             : ((landmark.LMMouthLeft + landmark.LMMouthRight)/2).generate_np_vector_from_3d_point(),
+            'Nose'              : landmark.LMNose.generate_np_vector_from_3d_point(),
+
+            # 'Test1'             : np.array([1,0,0]),
+            # 'Test2'             : np.array([0,1,0]),
+            # 'Test3'             : np.array([0,0,1]),
+
+            'HipCenter'         : ((landmark.LMLeftHip + landmark.LMRightHip)/2).generate_np_vector_from_3d_point(),
+        }
+
+        self.Nr_of_skeleton_points = len(self.skeleton_points)
+
+
+
+    def copy(self):
+        Copy = Skeleton()
+        for key, value in self.skeleton_points.items():
+            Copy.skeleton_points[key] = value
+        Copy.Nr_of_skeleton_points = self.Nr_of_skeleton_points
+
+        return Copy
 
 def keypoints_to_original(scale,center,points):
     scores = points[:,2]
@@ -127,23 +307,12 @@ def get_rot_hands(pose3d):
     
     return l_hand_rot, r_hand_rot
 
-def get_rot_mediapipe(pose3d):
-    hip_left = pose3d[2]
-    hip_right = pose3d[3]
-    hip_up = pose3d[16]
+def get_rot_mediapipe(skeleton:Skeleton) -> FootRotation:
     
-    foot_l_f = pose3d[20]
-    foot_l_b = pose3d[21]
-    foot_l_u = pose3d[22]
-    
-    foot_r_f = pose3d[17]
-    foot_r_b = pose3d[18]
-    foot_r_u = pose3d[19]
-    
-    # hip
-    
-    x = hip_right - hip_left
-    w = hip_up - hip_left
+    ############################################################# 
+    # Hip
+    x = skeleton.skeleton_points['RightHip'] - skeleton.skeleton_points['LeftHip']
+    w = skeleton.skeleton_points['Torso'] - skeleton.skeleton_points['HipCenter']
     z = np.cross(x, w)
     y = np.cross(z, x)
     
@@ -152,11 +321,10 @@ def get_rot_mediapipe(pose3d):
     z = z/np.sqrt(sum(z**2))
     
     hip_rot = np.vstack((x, y, z)).T
-    
-    # left foot
-    
-    x = foot_l_f - foot_l_b
-    w = foot_l_u - foot_l_b
+    ############################################################# 
+    # Left foot
+    x = skeleton.skeleton_points['LeftFootIndex'] - skeleton.skeleton_points['LeftHeel'] 
+    w = skeleton.skeleton_points['LeftKnee'] - skeleton.skeleton_points['LeftHeel']
     z = np.cross(x, w)
     y = np.cross(z, x)
     
@@ -165,11 +333,10 @@ def get_rot_mediapipe(pose3d):
     z = z/np.sqrt(sum(z**2))
     
     l_foot_rot = np.vstack((x, y, z)).T
-    
-    # right foot
-    
-    x = foot_r_f - foot_r_b
-    w = foot_r_u - foot_r_b
+    ############################################################# 
+    # Right foot
+    x = skeleton.skeleton_points['RightFootIndex'] - skeleton.skeleton_points['RightHeel'] 
+    w = skeleton.skeleton_points['RightKnee'] - skeleton.skeleton_points['RightHeel']
     z = np.cross(x, w)
     y = np.cross(z, x)
     
@@ -183,26 +350,16 @@ def get_rot_mediapipe(pose3d):
     r_foot_rot = R.from_matrix(r_foot_rot).as_quat()
     l_foot_rot = R.from_matrix(l_foot_rot).as_quat()
     
-    return hip_rot, l_foot_rot, r_foot_rot
+    FootRot = FootRotation(RightFoot = r_foot_rot,
+                           LeftFoot= l_foot_rot,
+                           Hip = hip_rot)
+    return FootRot
 
-    
-def get_rot(pose3d):
-
-    ## guesses
-    hip_left = 2
-    hip_right = 3
-    hip_up = 16
-    
-    knee_left = 1
-    knee_right = 4
-    
-    ankle_left = 0
-    ankle_right = 5
-    
-    # hip
-    
-    x = pose3d[hip_right] - pose3d[hip_left]
-    w = pose3d[hip_up] - pose3d[hip_left]
+def get_rot(skeleton:Skeleton) -> FootRotation:
+    ############################################################# 
+    # Hip
+    x = skeleton.skeleton_points['RightHip'] - skeleton.skeleton_points['LeftHip']
+    w = skeleton.skeleton_points['Torso'] - skeleton.skeleton_points['HipCenter']
     z = np.cross(x, w)
     y = np.cross(z, x)
     
@@ -212,13 +369,13 @@ def get_rot(pose3d):
     
     hip_rot = np.vstack((x, y, z)).T
 
-    # right leg
-    
-    y = pose3d[knee_right] - pose3d[ankle_right]
-    w = pose3d[hip_right] - pose3d[ankle_right]
+    #############################################################
+    # Right leg 
+    y = skeleton.skeleton_points['RightKnee'] - skeleton.skeleton_points['RightAnkle']
+    w = skeleton.skeleton_points['RightHip'] - skeleton.skeleton_points['RightAnkle']
     z = np.cross(w, y)
     if np.sqrt(sum(z**2)) < 1e-6:
-        w = pose3d[hip_left] - pose3d[ankle_left]
+        w = skeleton.skeleton_points['LeftHip'] - skeleton.skeleton_points['RightAnkle']
         z = np.cross(w, y)
     x = np.cross(y,z)
     
@@ -228,13 +385,13 @@ def get_rot(pose3d):
     
     leg_r_rot = np.vstack((x, y, z)).T
 
-    # left leg
-    
-    y = pose3d[knee_left] - pose3d[ankle_left]
-    w = pose3d[hip_left] - pose3d[ankle_left]
+    #############################################################
+    # Left leg
+    y = skeleton.skeleton_points['LeftKnee'] - skeleton.skeleton_points['LeftAnkle']
+    w = skeleton.skeleton_points['LeftHip'] - skeleton.skeleton_points['LeftAnkle']
     z = np.cross(w, y)
     if np.sqrt(sum(z**2)) < 1e-6:
-        w = pose3d[hip_right] - pose3d[ankle_left]
+        w = skeleton.skeleton_points['RightHip'] - skeleton.skeleton_points['LeftAnkle']
         z = np.cross(w, y)
     x = np.cross(y,z)
     
@@ -248,7 +405,10 @@ def get_rot(pose3d):
     rot_leg_r = R.from_matrix(leg_r_rot).as_quat()
     rot_leg_l = R.from_matrix(leg_l_rot).as_quat()
     
-    return rot_hip, rot_leg_l, rot_leg_r
+    FootRot = FootRotation(RightFoot = rot_leg_r,
+                           LeftFoot  = rot_leg_l,
+                           Hip       = rot_hip)
+    return FootRot
 
 
 def sendToPipe(text):
@@ -288,12 +448,13 @@ def sendToSteamVR_(text):
     return array
 
 
-def sendToSteamVR(text, num_tries=10, wait_time=0.1):
+def sendToSteamVR(text, num_tries=10, wait_time=0.01):
     # wrapped function sendToSteamVR that detects failed connections
     ret = sendToSteamVR_(text)
     i = 0
     while "error" in ret:
-        print("INFO: Error while connecting to SteamVR. Retrying...")
+        if i > 5:
+            print("INFO: Error while connecting to SteamVR. Retrying...")
         time.sleep(wait_time)
         ret = sendToSteamVR_(text)
         i += 1
@@ -304,7 +465,7 @@ def sendToSteamVR(text, num_tries=10, wait_time=0.1):
 
     
 class CameraStream():
-    def __init__(self, params):
+    def __init__(self, params:'Parameters'):
         self.params = params
         self.image_ready = False
         # setup camera capture
@@ -346,10 +507,10 @@ class CameraStream():
                 return
  
 
-def shutdown(params):
+def shutdown(params:'Parameters'):
     # first save parameters 
     print("INFO: Saving parameters...")
     params.save_params()
 
     cv2.destroyAllWindows()
-    sys.exit("INFO: Exiting... You can close the window after 10 seconds.")
+    # sys.exit("INFO: Exiting... You can close the window after 10 seconds.")

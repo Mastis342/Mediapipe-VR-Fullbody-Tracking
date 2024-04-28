@@ -3,11 +3,12 @@ from tkinter import ttk
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 from helpers import shutdown, sendToSteamVR
+from parameters import Parameters
 
 #use_steamvr = True
 
 class InferenceWindow(tk.Frame):
-    def __init__(self, root, params, *args, **kwargs):
+    def __init__(self, root, params:Parameters, *args, **kwargs):
         tk.Frame.__init__(self, root, *args, **kwargs)
         
         self.params = params
@@ -321,7 +322,7 @@ class InferenceWindow(tk.Frame):
 
         if self.params.calib_tilt:
             try:
-                feet_middle = (self.params.pose3d_og[0] + self.params.pose3d_og[5])/2
+                feet_middle = (self.params.VR_skeleton_og.skeleton_points["RightAnkle"] + self.params.VR_skeleton_og.skeleton_points["LeftAnkle"])/2
             except:
                 print("INFO: No pose detected, try to autocalibrate again.")
                 return
@@ -330,40 +331,40 @@ class InferenceWindow(tk.Frame):
         
             ## roll calibaration
             
-            value = np.arctan2(feet_middle[0],-feet_middle[1]) * 57.295779513
+            roll = np.arctan2(feet_middle[0],-feet_middle[1]) * 57.295779513
             
-            print("INFO: Precalib z angle: ", value)
+            print("INFO: Precalib z angle: ", roll)
             
-            self.params.rot_change_z(-value+180)
+            self.params.rot_change_z(-roll+180)
             self.set_rot_z_var()
             
-            for j in range(self.params.pose3d_og.shape[0]):
-                self.params.pose3d_og[j] = self.params.global_rot_z.apply(self.params.pose3d_og[j])
+            for key, value in self.params.VR_skeleton_og.skeleton_points.items():
+                self.params.VR_skeleton_og.skeleton_points[key] = self.params.global_rot_z.apply(value)
                 
-            feet_middle = (self.params.pose3d_og[0] + self.params.pose3d_og[5])/2
-            value = np.arctan2(feet_middle[0],-feet_middle[1]) * 57.295779513
+            feet_middle = (self.params.VR_skeleton_og.skeleton_points["RightAnkle"] + self.params.VR_skeleton_og.skeleton_points["LeftAnkle"])/2
+            roll = np.arctan2(feet_middle[0],-feet_middle[1]) * 57.295779513
             
-            print("INFO: Postcalib z angle: ", value)
+            print("INFO: Postcalib z angle: ", roll)
                 
             ##tilt calibration
                 
-            value = np.arctan2(feet_middle[2],-feet_middle[1]) * 57.295779513
+            tilt = np.arctan2(feet_middle[2],-feet_middle[1]) * 57.295779513
             
-            print("INFO: Precalib x angle: ", value)
+            print("INFO: Precalib x angle: ", tilt)
             
-            self.params.rot_change_x(value+90)
+            self.params.rot_change_x(tilt+90)
             self.set_rot_x_var()
         
-            for j in range(self.params.pose3d_og.shape[0]):
-                self.params.pose3d_og[j] = self.params.global_rot_x.apply(self.params.pose3d_og[j])
+            for key, value in self.params.VR_skeleton_og.skeleton_points.items():
+                self.params.VR_skeleton_og.skeleton_points[key] = self.params.global_rot_x.apply(value)
                 
-            feet_middle = (self.params.pose3d_og[0] + self.params.pose3d_og[5])/2
-            value = np.arctan2(feet_middle[2],-feet_middle[1]) * 57.295779513
+            feet_middle = (self.params.VR_skeleton_og.skeleton_points["RightAnkle"] + self.params.VR_skeleton_og.skeleton_points["LeftAnkle"])/2
+            tilt = np.arctan2(feet_middle[2],-feet_middle[1]) * 57.295779513
             
-            print("INFO: Postcalib x angle: ", value)
+            print("INFO: Postcalib x angle: ", tilt)
 
         if use_steamvr and self.params.calib_rot:
-            feet_rot = self.params.pose3d_og[0] - self.params.pose3d_og[5]
+            feet_rot = self.params.VR_skeleton_og.skeleton_points["LeftAnkle"] - self.params.VR_skeleton_og.skeleton_points["RightAnkle"]
             value = np.arctan2(feet_rot[0],feet_rot[2])
             value_hmd = np.arctan2(headsetrot.as_matrix()[0][0],headsetrot.as_matrix()[2][0])
             print("INFO: Precalib y value: ", value * 57.295779513)
@@ -382,10 +383,10 @@ class InferenceWindow(tk.Frame):
             
             self.set_rot_y_var()
 
-            for j in range(self.params.pose3d_og.shape[0]):
-                self.params.pose3d_og[j] = self.params.global_rot_y.apply(self.params.pose3d_og[j])
+            for key, value in self.params.VR_skeleton_og.skeleton_points.items():
+                self.params.VR_skeleton_og.skeleton_points[key] = self.params.global_rot_y.apply(value)
             
-            feet_rot = self.params.pose3d_og[0] - self.params.pose3d_og[5]
+            feet_rot = self.params.VR_skeleton_og.skeleton_points["LeftAnkle"] - self.params.VR_skeleton_og.skeleton_points["RightAnkle"]
             value = np.arctan2(feet_rot[0],feet_rot[2])
             
             print("INFO: Postcalib y value: ", value * 57.295779513)
@@ -393,8 +394,18 @@ class InferenceWindow(tk.Frame):
         if use_steamvr and self.params.calib_scale:
             #calculate the height of the skeleton, calculate the height in steamvr as distance of hmd from the ground.
             #divide the two to get scale 
-            skelSize = np.max(self.params.pose3d_og, axis=0)-np.min(self.params.pose3d_og, axis=0)
-            self.params.posescale = headsetpos[1]/skelSize[1]
+            
+            skelMax = -100
+            skelMin = 100
+            for key, value in self.params.VR_skeleton_og.skeleton_points.items():
+                    if skelMax < value[1]:
+                        skelMax = value[1]
+                    if skelMin > value[1]:
+                        skelMin = value[1]
+            skelSize = skelMax - skelMin
+
+            print("INFO: Skelsize: ", skelSize)
+            self.params.posescale = headsetpos[1]/skelSize
 
             self.set_scale_var()
 
@@ -420,5 +431,6 @@ def make_inference_gui(_params):
     
 
 if __name__ == "__main__":
-    #make_inference_gui()
+    params = Parameters()
+    make_inference_gui(params)
     print("hehe")

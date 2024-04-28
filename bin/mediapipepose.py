@@ -9,26 +9,29 @@ import time
 import threading
 import cv2
 import numpy as np
+import matplotlib.pyplot as plt
 
-from helpers import  CameraStream, shutdown, mediapipeTo3dpose, get_rot_mediapipe, get_rot_hands, draw_pose, keypoints_to_original, normalize_screen_coordinates, get_rot
+from helpers import  CameraStream, Skeleton, LandmarkPose, _3dPoint, shutdown, get_rot_mediapipe, get_rot_hands, draw_pose, keypoints_to_original, normalize_screen_coordinates, get_rot
 from scipy.spatial.transform import Rotation as R
-from backends import DummyBackend, SteamVRBackend, VRChatOSCBackend
+from backends import DummyBackend, SteamVRBackend, VRChatOSCBackend, Backend
 import webui
 
 import inference_gui
+import pyplot_gui
 import parameters
 
 import tkinter as tk
 
 import mediapipe as mp
+from mediapipe.python.solutions import drawing_utils, pose
 
 
 def main():
-    mp_drawing = mp.solutions.drawing_utils
-    mp_pose = mp.solutions.pose
+    mp_drawing = drawing_utils
+    mp_pose = pose
 
     use_steamvr = True
-    
+
     print("INFO: Reading parameters...")
 
     params = parameters.Parameters()
@@ -40,7 +43,7 @@ def main():
         print("INFO: WebUI disabled in parameters")
 
     backends = { 0: DummyBackend, 1: SteamVRBackend, 2: VRChatOSCBackend }
-    backend = backends[params.backend]()
+    backend:Backend = backends[params.backend]()
     backend.connect(params)
 
     if params.exit_ready:
@@ -51,33 +54,35 @@ def main():
     camera_thread = CameraStream(params)
 
     #making gui
+    # make_inference_gui(params)
     gui_thread = threading.Thread(target=inference_gui.make_inference_gui, args=(params,), daemon=True)
     gui_thread.start()
+
+    Landmark = LandmarkPose()
+    VR_skeleton = Skeleton()
+
+    # # Pyplot
+    # pyplot_thread = threading.Thread(target=pyplot_gui.make_pyplot_gui, args =(params, VR_skeleton), daemon = True )
+    # pyplot_thread.start()
 
     print("INFO: Starting pose detector...")
 
     #create our detector. These are default parameters as used in the tutorial. 
-    pose = mp_pose.Pose(model_complexity=params.model, 
-                        min_detection_confidence=0.5, 
-                        min_tracking_confidence=params.min_tracking_confidence, 
-                        smooth_landmarks=params.smooth_landmarks, 
-                        static_image_mode=params.static_image)
+    pose_detector = mp_pose.Pose(model_complexity=params.model, 
+                                 min_detection_confidence=0.5, 
+                                 min_tracking_confidence=params.min_tracking_confidence, 
+                                 smooth_landmarks=params.smooth_landmarks, 
+                                 static_image_mode=params.static_image)
+    
 
     cv2.namedWindow("out")
 
     #Main program loop:
-
-    rotation = 0
-    i = 0
-
     prev_smoothing = params.smoothing
     prev_add_smoothing = params.additional_smoothing
 
-    while True:
-        # Capture frame-by-frame
-        if params.exit_ready:
-            shutdown(params)
-            
+
+    while not params.exit_ready:
         if prev_smoothing != params.smoothing or prev_add_smoothing != params.additional_smoothing:
             print(f"INFO: Changed smoothing value from {prev_smoothing} to {params.smoothing}")
             print(f"INFO: Changed additional smoothing from {prev_add_smoothing} to {params.additional_smoothing}")
@@ -90,11 +95,12 @@ def main():
         #wait untill camera thread captures another image
         if not camera_thread.image_ready:     
             time.sleep(0.001)
+            # print(". ", end='')
             continue
 
         #some may say I need a mutex here. I say this works fine.
         img = camera_thread.image_from_thread.copy() 
-        camera_thread.image_ready = False         
+        camera_thread.image_ready = False
         
         #if set, rotate the image
         if params.rotate_image is not None:       
@@ -115,48 +121,47 @@ def main():
         
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-        #print(image.shape)
-        
         t0 = time.time()
         # To improve performance, optionally mark the image as not writeable to
         # pass by reference.    copied from the tutorial
         img.flags.writeable = False
-        results = pose.process(img)
+        landmark_pose = pose_detector.process(img)
         img.flags.writeable = True
 
-        if results.pose_world_landmarks:        #if any pose was detected
+
+        if landmark_pose.pose_world_landmarks:        #if any pose was detected
             
-            pose3d = mediapipeTo3dpose(results.pose_world_landmarks.landmark)   #convert keypoints to a format we use
+            Landmark.update_landmarks(landmark_pose.pose_world_landmarks.landmark)
+            VR_skeleton.update_skeleton(Landmark)   #convert keypoints to a format we use
             
             #do we need this with osc as well?
-           
-            pose3d[:,0] = -pose3d[:,0]      #flip the points a bit since steamvrs coordinate system is a bit diffrent
-            pose3d[:,1] = -pose3d[:,1]
 
-            pose3d_og = pose3d.copy()
-            params.pose3d_og = pose3d_og
-            
-            for j in range(pose3d.shape[0]):        #apply the rotations from the sliders
-                pose3d[j] = params.global_rot_z.apply(pose3d[j])
-                pose3d[j] = params.global_rot_x.apply(pose3d[j])
-                pose3d[j] = params.global_rot_y.apply(pose3d[j])
+            VR_skeleton_og = VR_skeleton.copy()
+            params.VR_skeleton_og = VR_skeleton_og
+
+            # if PlotCounter <= 60:
+            #     PlotPoints = False
+            #     PlotCounter += 1
+            # else:
+            #     PlotPoints = True
+            #     PlotCounter = 0
+
+            for key, value in VR_skeleton.skeleton_points.items():        #apply the rotations from the sliders
+                VR_skeleton.skeleton_points[key] = params.global_rot_z.apply(VR_skeleton.skeleton_points[key])
+                VR_skeleton.skeleton_points[key] = params.global_rot_x.apply(VR_skeleton.skeleton_points[key])
+                VR_skeleton.skeleton_points[key] = params.global_rot_y.apply(VR_skeleton.skeleton_points[key])
             
             if not params.feet_rotation:
-                rots = get_rot(pose3d)          #get rotation data of feet and hips from the position-only skeleton data
+                rots = get_rot(VR_skeleton)          #get rotation data of feet and hips from the position-only skeleton data
             else:
-                rots = get_rot_mediapipe(pose3d)
+                rots = get_rot_mediapipe(VR_skeleton)
                 
             if params.use_hands:
-                hand_rots = get_rot_hands(pose3d)
+                hand_rots = get_rot_hands(VR_skeleton)
             else:
                 hand_rots = None
-                
             
-            #pose3d[0] = [1,0,1]
-            #rots = (rots[0], R.from_euler('ZXY',[i/17,i/11,i/10]).as_quat(),rots[2])   #for testing rotation conversions
-            #i+=1
-            
-            if not backend.updatepose(params, pose3d, rots, hand_rots):
+            if not backend.updatepose(params, VR_skeleton, rots, hand_rots):
                 continue
         
         
@@ -168,7 +173,7 @@ def main():
         
         img = cv2.cvtColor(img,cv2.COLOR_RGB2BGR)       #convert back to bgr and draw the pose
         mp_drawing.draw_landmarks(
-            img, results.pose_landmarks, mp_pose.POSE_CONNECTIONS)
+            img, landmark_pose.pose_landmarks, mp_pose.POSE_CONNECTIONS)
         img = cv2.putText(img, f"{inference_time:1.3f}, FPS:{int(1/inference_time)}", (10,30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 1, cv2.LINE_AA)
         
         cv2.imshow("out", img)           #show image, exit program if we press esc
@@ -176,6 +181,9 @@ def main():
             backend.disconnect()
             shutdown(params)
 
+    # Capture frame-by-frame
+    if params.exit_ready:
+        shutdown(params)
 
 if __name__ == "__main__":
     main()
